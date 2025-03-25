@@ -13,7 +13,8 @@ int getCoreCount();
 double getCpuUsage(long* last_total_user, long* last_total_user_low, long* last_total_sys, long* last_total_idle);
 void parseArguments(int argc, char **argv, int *samples, int *tdelay, int *memory, int *cpu, int *cores);
 void printCoreDiagram(int num_cores);
-void printMemoryUsage(int samples, int col_index, int **mem_history, struct sysinfo *info);
+// void printMemoryUsage(int samples, int col_index, int **mem_history, struct sysinfo *info);
+void printMemoryUsage(int samples, int col_index, int **mem_history, int pos, double total_memory, double used_memory);
 void printCpuUsage(int samples, int col_index, int **cpu_history, long *last_total_user, long *last_total_user_low, long *last_total_sys, long *last_total_idle);
 void cleanup(int **cpu_history, int **mem_history);
 
@@ -57,7 +58,7 @@ int getCoreCount() {
     FILE *file = fopen("/proc/cpuinfo", "r");
     if (file == NULL) {
         fprintf(stderr, "Error: Failed to open /proc/cpuinfo\n");
-        return -1;
+        exit(1);
     }
 
     int core_count = 0;
@@ -84,7 +85,7 @@ double getCpuUsage(long* last_total_user, long* last_total_user_low, long* last_
     FILE *file = fopen("/proc/stat", "r");
     if (file == NULL) {
         fprintf(stderr, "Error: Failed to open /proc/stat\n");
-        return -1;
+        exit(1);
     }
 
     char line[128];
@@ -211,24 +212,18 @@ void printCoreDiagram(int num_cores) {
  * @param mem_history The memory history array.
  * @param info Pointer to the sysinfo structure.
  */
-void printMemoryUsage(int samples, int col_index, int **mem_history, struct sysinfo *info) {
-    double total_memory = info->totalram;
-    double used_memory = (total_memory - info->freeram) / 1e9;
-
-    // Convert memory usage to a vertical position
-    int used_blocks_mem = (int)((used_memory / (total_memory / 1e9)) * 9);
-
-    printf("v Memory %.2f GB\n", used_memory);
-
+void printMemoryUsage(int samples, int col_index, int **mem_history, int pos, double total_memory, double used_memory) {
     // Clear previous values in this column before setting the new #
     for (int row = 0; row < 10; row++) {
         mem_history[row][col_index] = 0;
     }
-    mem_history[9 - used_blocks_mem][col_index] = 1; // Place new #
+    mem_history[pos][col_index] = 1; // Place new #
+
+    printf("v Memory %.2f GB\n", used_memory);
 
     for (int row = 0; row < 10; row++) {
         if (row == 0){
-            printf("%.2f GB |", total_memory / 1e9);
+            printf("%.2f GB |", total_memory);
         }
         else{
             printf("\n         |");
@@ -341,7 +336,7 @@ int main(int argc, char **argv) {
     int num_cores = getCoreCount();
     if (num_cores <= 0) {
         fprintf(stderr, "Error: Failed to determine CPU core count\n");
-        return 1;
+        exit(1);
     }
 
     // Dynamically allocate memory for history arrays
@@ -349,7 +344,7 @@ int main(int argc, char **argv) {
     int **mem_history = malloc(10 * sizeof(int *));
     if (cpu_history == NULL || mem_history == NULL) {
         fprintf(stderr, "Error: Memory allocation failed\n");
-        return 1;
+        exit(1);
     }
     for (int row = 0; row < 10; row++) {
         cpu_history[row] = malloc(samples * sizeof(int));
@@ -357,7 +352,7 @@ int main(int argc, char **argv) {
         if (cpu_history[row] == NULL || mem_history[row] == NULL) {
             fprintf(stderr, "Error: Memory allocation failed\n");
             cleanup(cpu_history, mem_history);
-            return 1;
+            exit(1);
         }
         memset(cpu_history[row], 0, samples * sizeof(int));
         memset(mem_history[row], 0, samples * sizeof(int));
@@ -376,9 +371,41 @@ int main(int argc, char **argv) {
         int col_index = i % samples;
 
         if (memory) {
-            struct sysinfo info;
-            sysinfo(&info);
-            printMemoryUsage(samples, col_index, mem_history, &info);
+            int pipe1[2];
+            if (pipe(pipe1)==-1){
+                perror("pipe failed");
+                cleanup(cpu_history, mem_history);
+                exit(1);
+            }
+            int result = fork();
+            if (result < 0){
+                perror("fork failed");
+                cleanup(cpu_history, mem_history);
+                exit(1);
+            }
+            else if (result == 0){
+                close(pipe1[0]);
+                struct sysinfo info;
+                sysinfo(&info);
+                double total_memory = info.totalram;
+                double total_memory_gb = total_memory / 1e9;
+                double used_memory = (total_memory - info.freeram) / 1e9;
+                double results[3];
+                results[0] = 9 - (int)((used_memory / total_memory_gb) * 9);
+                results[1] = total_memory_gb;
+                results[2] = used_memory;
+                int used_blocks_mem = (int)((used_memory / total_memory_gb) * 9);
+                write(pipe1[1], results, sizeof(results));
+                close(pipe1[1]);
+                exit(0);
+            }
+            else{
+                double results[3];
+                close(pipe1[1]);
+                read(pipe1[0], results, sizeof(results));
+                printMemoryUsage(samples, col_index, mem_history, (int)results[0], results[1], results[2]);
++               close(pipe1[0]);
+            }
         }
 
         if (cpu) {
@@ -390,7 +417,7 @@ int main(int argc, char **argv) {
             if (file == NULL) {
                 fprintf(stderr, "Error: Failed to open CPU frequency file\n");
                 cleanup(cpu_history, mem_history);
-                return 1;
+                exit(1);
             }
 
             unsigned long khz = 0;
@@ -398,7 +425,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Error: Failed to read CPU frequency\n");
                 fclose(file);
                 cleanup(cpu_history, mem_history);
-                return 1;
+                exit(1);
             }
             fclose(file);
 
