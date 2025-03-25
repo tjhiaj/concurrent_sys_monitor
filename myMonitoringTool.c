@@ -6,7 +6,6 @@
 #include <sys/resource.h>
 #include <unistd.h>
 #include <signal.h>
-// #include <sys/types.h>
 #include <sys/wait.h>
 
 // Function prototypes
@@ -16,7 +15,6 @@ double getCpuUsage(long* last_total_user, long* last_total_user_low, long* last_
 void parseArguments(int argc, char **argv, int *samples, int *tdelay, int *memory, int *cpu, int *cores);
 void printCoreDiagram(int num_cores);
 void printMemoryUsage(int samples, int col_index, int **mem_history, int pos, double total_memory, double used_memory);
-// void printCpuUsage(int samples, int col_index, int **cpu_history, long *last_total_user, long *last_total_user_low, long *last_total_sys, long *last_total_idle);
 void printCpuUsage(int samples, int col_index, int **cpu_history, double cpu_usage);
 void cleanup(int **cpu_history, int **mem_history);
 
@@ -402,11 +400,7 @@ int main(int argc, char **argv) {
                 exit(0);
             }
             else{
-                // double results[3];
                 close(pipes[0][1]);
-                // read(pipe1[0], results, sizeof(results));
-                // printMemoryUsage(samples, col_index, mem_history, (int)results[0], results[1], results[2]);
-                // close(pipe1[0]);
             }
         }
 
@@ -426,15 +420,46 @@ int main(int argc, char **argv) {
             
             }
             else{
-                // double cpu_usage;
                 close(pipes[1][1]);
-                // read(pipe2[0], cpu_usage, sizeof(cpu_usage));
-                // printCpuUsage(samples, col_index, cpu_history, cpu_usage);
-                // close(pipe1[0]);
             }
         }
 
-        for (int i = 0; i < 2; i++) {
+        if (cores) {
+            int result = fork();
+            if (result < 0){
+                perror("fork failed");
+                cleanup(cpu_history, mem_history);
+                exit(1);
+            }
+            else if (result == 0){
+                close(pipes[2][0]);
+                FILE *file = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", "r");
+                if (file == NULL) {
+                    fprintf(stderr, "Error: Failed to open CPU frequency file\n");
+                    cleanup(cpu_history, mem_history);
+                    exit(1);
+                }
+
+                unsigned long khz = 0;
+                if (fscanf(file, "%lu", &khz) != 1) {
+                    fprintf(stderr, "Error: Failed to read CPU frequency\n");
+                    fclose(file);
+                    cleanup(cpu_history, mem_history);
+                    exit(1);
+                }
+                fclose(file);
+
+                double ghz = khz / 1e6;
+                write(pipes[2][1], &ghz, sizeof(ghz));
+                close(pipes[2][1]);
+                exit(0);
+            }
+            else{
+                close(pipes[2][1]);
+            }
+        }
+
+        for (int i = 0; i < 3; i++) {
             wait(NULL);
         }
 
@@ -448,27 +473,11 @@ int main(int argc, char **argv) {
         printCpuUsage(samples, col_index, cpu_history, cpu_usage);
         close(pipes[1][0]);
 
-        if (cores) {
-            FILE *file = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", "r");
-            if (file == NULL) {
-                fprintf(stderr, "Error: Failed to open CPU frequency file\n");
-                cleanup(cpu_history, mem_history);
-                exit(1);
-            }
-
-            unsigned long khz = 0;
-            if (fscanf(file, "%lu", &khz) != 1) {
-                fprintf(stderr, "Error: Failed to read CPU frequency\n");
-                fclose(file);
-                cleanup(cpu_history, mem_history);
-                exit(1);
-            }
-            fclose(file);
-
-            double ghz = khz / 1e6;
-            printf("v Number of Cores: %d @ %.2f GHz\n", num_cores, ghz);
-            printCoreDiagram(num_cores);
-        }
+        double ghz;
+        read(pipes[2][0], &ghz, sizeof(ghz));
+        printf("v Number of Cores: %d @ %.2f GHz\n", num_cores, ghz);
+        printCoreDiagram(num_cores);
+        close(pipes[2][0]);
 
         usleep(tdelay);
     }
