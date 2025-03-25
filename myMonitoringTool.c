@@ -6,6 +6,8 @@
 #include <sys/resource.h>
 #include <unistd.h>
 #include <signal.h>
+// #include <sys/types.h>
+#include <sys/wait.h>
 
 // Function prototypes
 int isNumber(char* input);
@@ -13,9 +15,9 @@ int getCoreCount();
 double getCpuUsage(long* last_total_user, long* last_total_user_low, long* last_total_sys, long* last_total_idle);
 void parseArguments(int argc, char **argv, int *samples, int *tdelay, int *memory, int *cpu, int *cores);
 void printCoreDiagram(int num_cores);
-// void printMemoryUsage(int samples, int col_index, int **mem_history, struct sysinfo *info);
 void printMemoryUsage(int samples, int col_index, int **mem_history, int pos, double total_memory, double used_memory);
-void printCpuUsage(int samples, int col_index, int **cpu_history, long *last_total_user, long *last_total_user_low, long *last_total_sys, long *last_total_idle);
+// void printCpuUsage(int samples, int col_index, int **cpu_history, long *last_total_user, long *last_total_user_low, long *last_total_sys, long *last_total_idle);
+void printCpuUsage(int samples, int col_index, int **cpu_history, double cpu_usage);
 void cleanup(int **cpu_history, int **mem_history);
 
 void ignore(int code){
@@ -257,9 +259,7 @@ void printMemoryUsage(int samples, int col_index, int **mem_history, int pos, do
  * @param last_total_sys Pointer to the previous total system time.
  * @param last_total_idle Pointer to the previous total idle time.
  */
-void printCpuUsage(int samples, int col_index, int **cpu_history, long *last_total_user, long *last_total_user_low, long *last_total_sys, long *last_total_idle) {
-    double cpu_usage = getCpuUsage(last_total_user, last_total_user_low, last_total_sys, last_total_idle);
-
+void printCpuUsage(int samples, int col_index, int **cpu_history, double cpu_usage) {
     // Convert CPU usage to a vertical position
     int used_blocks_cpu = (int)((cpu_usage / 100) * 9);
 
@@ -369,14 +369,16 @@ int main(int argc, char **argv) {
     for (int i = 0; i < samples; i++) {
         printf("\033c"); // Clear screen
         int col_index = i % samples;
-
-        if (memory) {
-            int pipe1[2];
-            if (pipe(pipe1)==-1){
+        int pipes[3][2];
+        for (int i = 0; i < 3; i++){
+            if (pipe(pipes[i])==-1){
                 perror("pipe failed");
                 cleanup(cpu_history, mem_history);
                 exit(1);
             }
+        }
+
+        if (memory) {            
             int result = fork();
             if (result < 0){
                 perror("fork failed");
@@ -384,7 +386,7 @@ int main(int argc, char **argv) {
                 exit(1);
             }
             else if (result == 0){
-                close(pipe1[0]);
+                close(pipes[0][0]);
                 struct sysinfo info;
                 sysinfo(&info);
                 double total_memory = info.totalram;
@@ -395,22 +397,56 @@ int main(int argc, char **argv) {
                 results[1] = total_memory_gb;
                 results[2] = used_memory;
                 int used_blocks_mem = (int)((used_memory / total_memory_gb) * 9);
-                write(pipe1[1], results, sizeof(results));
-                close(pipe1[1]);
+                write(pipes[0][1], results, sizeof(results));
+                close(pipes[0][1]);
                 exit(0);
             }
             else{
-                double results[3];
-                close(pipe1[1]);
-                read(pipe1[0], results, sizeof(results));
-                printMemoryUsage(samples, col_index, mem_history, (int)results[0], results[1], results[2]);
-+               close(pipe1[0]);
+                // double results[3];
+                close(pipes[0][1]);
+                // read(pipe1[0], results, sizeof(results));
+                // printMemoryUsage(samples, col_index, mem_history, (int)results[0], results[1], results[2]);
+                // close(pipe1[0]);
             }
         }
 
         if (cpu) {
-            printCpuUsage(samples, col_index, cpu_history, &last_total_user, &last_total_user_low, &last_total_sys, &last_total_idle);
+            int result = fork();
+            if (result < 0){
+                perror("fork failed");
+                cleanup(cpu_history, mem_history);
+                exit(1);
+            }
+            else if (result == 0){
+                close(pipes[1][0]);
+                double cpu_usage = getCpuUsage(&last_total_user, &last_total_user_low, &last_total_sys, &last_total_idle);
+                write(pipes[1][1], &cpu_usage, sizeof(cpu_usage));
+                close(pipes[1][1]);
+                exit(0);
+            
+            }
+            else{
+                // double cpu_usage;
+                close(pipes[1][1]);
+                // read(pipe2[0], cpu_usage, sizeof(cpu_usage));
+                // printCpuUsage(samples, col_index, cpu_history, cpu_usage);
+                // close(pipe1[0]);
+            }
         }
+
+        for (int i = 0; i < 2; i++) {
+            wait(NULL);
+        }
+
+        double results[3];
+        read(pipes[0][0], results, sizeof(results));
+        printMemoryUsage(samples, col_index, mem_history, (int)results[0], results[1], results[2]);
+        close(pipes[0][0]);
+
+        double cpu_usage;
+        read(pipes[1][0], &cpu_usage, sizeof(cpu_usage));
+        printCpuUsage(samples, col_index, cpu_history, cpu_usage);
+        close(pipes[1][0]);
 
         if (cores) {
             FILE *file = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", "r");
