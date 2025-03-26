@@ -1,28 +1,18 @@
-#include <stdio.h>
-#include <string.h>
-#include <ctype.h>
-#include <stdlib.h>
-#include <sys/sysinfo.h>
-#include <sys/resource.h>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>
-
-// Function prototypes
-int isNumber(char* input);
-int getCoreCount();
-double getCpuUsage(long* last_total_user, long* last_total_user_low, long* last_total_sys, long* last_total_idle);
-void parseArguments(int argc, char **argv, int *samples, int *tdelay, int *memory, int *cpu, int *cores);
-void printCoreDiagram(int num_cores);
-void printMemoryUsage(int samples, int col_index, int **mem_history, int pos, double total_memory, double used_memory);
-void printCpuUsage(int samples, int col_index, int **cpu_history, double cpu_usage);
-void cleanup(int **cpu_history, int **mem_history);
+#include "myMonitoringTool.h"
 
 void ignore(int code){
+    ///_|> descry: handler for sigtstp
+    ///_|> arg_i: int code, the signal number
+    ///_|> returning: nothing   
+
     printf("\nStop ignored (code=%d)\n", code);
 }
 
 void quit(int code){
+    ///_|> descry: handler for sigint
+    ///_|> arg_i: int code, the signal number
+    ///_|> returning: nothing
+
     printf("\nInterrupt (code=%d) Do you want to quit? Input 'y' or 'n'\n", code);
     char response = getchar();
     if (response == 'y') {
@@ -33,13 +23,11 @@ void quit(int code){
     }
 }
 
-/**
- * Checks if a string represents a valid number.
- * 
- * @param input The string to check.
- * @return 1 if the string is a valid number, 0 otherwise.
- */
 int isNumber(char* input) {
+    ///_|> descry: checks if a string represents a valid number
+    ///_|> arg_i: char* input, the text to be checked
+    ///_|> returning: 1 for true, 0 for false
+
     int length = strlen(input);
     for (int i = 0; i < length; i++) {
         if (!isdigit(input[i])) {
@@ -49,18 +37,15 @@ int isNumber(char* input) {
     return 1;
 }
 
-/**
- * Retrieves the number of CPU cores by reading /proc/cpuinfo.
- * 
- * @return The number of CPU cores, or -1 on error.
- */
 int getCoreCount() {
+    ///_|> descry: retrieves the number of cpu cores by reading /proc/cpuinfo
+    ///_|> returning: number of cores
+
     FILE *file = fopen("/proc/cpuinfo", "r");
     if (file == NULL) {
         fprintf(stderr, "Error: Failed to open /proc/cpuinfo\n");
         exit(1);
     }
-
     int core_count = 0;
     char line[256];
     while (fgets(line, sizeof(line), file)) {
@@ -72,16 +57,17 @@ int getCoreCount() {
     return core_count;
 }
 
-/**
- * Calculates the CPU usage by reading /proc/stat.
- * 
- * @param last_total_user Pointer to the previous total user time.
- * @param last_total_user_low Pointer to the previous total low user time.
- * @param last_total_sys Pointer to the previous total system time.
- * @param last_total_idle Pointer to the previous total idle time.
- * @return The CPU usage as a percentage.
- */
-double getCpuUsage(long* last_total_user, long* last_total_user_low, long* last_total_sys, long* last_total_idle) {
+double getCpuUsage(long* last_total_user, long* last_total_user_low, long* last_total_sys, long* last_total_idle, long* last_total_io, long* last_total_irq, long* last_total_soft) {
+    ///_|> descry: calculates the CPU usage by reading /proc/stat
+    ///_|> arg_i: long* last_total_user, previous time spent processing normally in user mode
+    ///_|> arg_ii: long* last_total_user_low, previous time spent with niced processes in user mode
+    ///_|> arg_iii: long* last_total_sys, previous time spent running in kernel mode
+    ///_|> arg_iv: long* last_total_idle, previous time spent doing nothing
+    ///_|> arg_v: long* last_total_io, previous time spent waiting for I/O
+    ///_|> arg_vi: long* last_total_irq, previous time spent serving hardware interrupts
+    ///_|> arg_vii: long* last_total_soft, previous time spent serving software interrupts
+    ///_|> returning: the cpu usage as a percentage
+
     FILE *file = fopen("/proc/stat", "r");
     if (file == NULL) {
         fprintf(stderr, "Error: Failed to open /proc/stat\n");
@@ -92,11 +78,12 @@ double getCpuUsage(long* last_total_user, long* last_total_user_low, long* last_
     fgets(line, sizeof(line), file);
     fclose(file);
 
-    long total_user, total_user_low, total_sys, total_idle;
-    sscanf(line, "cpu  %ld %ld %ld %ld", &total_user, &total_user_low, &total_sys, &total_idle);
+    long total_user, total_user_low, total_sys, total_idle, total_io, total_irq, total_soft;
+    sscanf(line, "cpu  %ld %ld %ld %ld %ld %ld %ld", &total_user, &total_user_low, &total_sys, &total_idle, &total_io, &total_irq, &total_soft);
 
     long total = (total_user - *last_total_user) + (total_user_low - *last_total_user_low) +
-                 (total_sys - *last_total_sys);
+                 (total_sys - *last_total_sys) + (total_io - *last_total_io) + (total_irq - *last_total_irq) +
+                 (total_soft - *last_total_soft);
     long total_time = total + (total_idle - *last_total_idle);
 
     double cpu_usage = (double)total / total_time * 100;
@@ -104,22 +91,24 @@ double getCpuUsage(long* last_total_user, long* last_total_user_low, long* last_
     *last_total_user_low = total_user_low;
     *last_total_sys = total_sys;
     *last_total_idle = total_idle;
+    *last_total_io = total_io;
+    *last_total_irq = total_irq;
+    *last_total_soft = total_soft;
 
     return cpu_usage;
 }
 
-/**
- * Parses command-line arguments and updates the corresponding parameters.
- * 
- * @param argc The number of command-line arguments.
- * @param argv The array of command-line arguments.
- * @param samples Pointer to the number of samples.
- * @param tdelay Pointer to the time delay between samples.
- * @param memory Pointer to the memory flag.
- * @param cpu Pointer to the CPU flag.
- * @param cores Pointer to the cores flag.
- */
 void parseArguments(int argc, char **argv, int *samples, int *tdelay, int *memory, int *cpu, int *cores) {
+    ///_|> descry: parses command-line arguments and updates the corresponding parameters
+    ///_|> arg_i: int argc, the number of command-line arguments
+    ///_|> arg_ii: char **argv, the array of command-line arguments
+    ///_|> arg_iii: int *samples, pointer to the number of samples
+    ///_|> arg_iv: int *tdelay, pointer to the time delay between samples
+    ///_|> arg_v: lint *memory, pointer to the memory flag
+    ///_|> arg_vi: int *cpu, pointer to the cpu flag
+    ///_|> arg_vii: int *cores, pointer to the cores flag
+    ///_|> returning: nothing
+
     int samples_pos_detected = 0;
     int flag_detected = 0;
 
@@ -159,12 +148,11 @@ void parseArguments(int argc, char **argv, int *samples, int *tdelay, int *memor
     }
 }
 
-/**
- * Prints a diagram representing the CPU cores in a grid (4 cores per row).
- * 
- * @param num_cores The number of CPU cores.
- */
 void printCoreDiagram(int num_cores) {
+    ///_|> descry: prints a diagram representing the cpu cores in a grid (4 cores per row)
+    ///_|> arg_i: int num_cores, the number of cpu cores
+    ///_|> returning: nothing
+
     int cores_per_row = 4; // Number of cores per row
     int rows = (num_cores + cores_per_row - 1) / cores_per_row; // Calculate the number of rows
 
@@ -204,15 +192,16 @@ void printCoreDiagram(int num_cores) {
     }
 }
 
-/**
- * Prints memory usage information and updates the memory history.
- * 
- * @param samples The number of samples.
- * @param col_index The current column index in the history array.
- * @param mem_history The memory history array.
- * @param info Pointer to the sysinfo structure.
- */
 void printMemoryUsage(int samples, int col_index, int **mem_history, int pos, double total_memory, double used_memory) {
+    ///_|> descry: prints memory usage information and updates the memory history
+    ///_|> arg_i: int samples, the number of samples
+    ///_|> arg_ii: int col_index, the current column index in the history array
+    ///_|> arg_iii: int **mem_history, the memory history array
+    ///_|> arg_iv: int pos, the row index to place the 1 in the memory history array
+    ///_|> arg_v: double total_memory, the total system memory
+    ///_|> arg_vi: double used_memory, the total used system memory
+    ///_|> returning: nothing
+
     // Clear previous values in this column before setting the new #
     for (int row = 0; row < 10; row++) {
         mem_history[row][col_index] = 0;
@@ -246,18 +235,14 @@ void printMemoryUsage(int samples, int col_index, int **mem_history, int pos, do
     printf("\n");
 }
 
-/**
- * Prints CPU usage information and updates the CPU history.
- * 
- * @param samples The number of samples.
- * @param col_index The current column index in the history array.
- * @param cpu_history The CPU history array.
- * @param last_total_user Pointer to the previous total user time.
- * @param last_total_user_low Pointer to the previous total low user time.
- * @param last_total_sys Pointer to the previous total system time.
- * @param last_total_idle Pointer to the previous total idle time.
- */
 void printCpuUsage(int samples, int col_index, int **cpu_history, double cpu_usage) {
+    ///_|> descry: prints cpu usage information and updates the cpu history
+    ///_|> arg_i: int samples, the number of samples
+    ///_|> arg_ii: int col_index, the current column index in the history array
+    ///_|> arg_iii: int **cpu_history, the cpu history array
+    ///_|> arg_iv: double cpu_usage, the cpu usage as a percentage
+    ///_|> returning: nothing
+
     // Convert CPU usage to a vertical position
     int used_blocks_cpu = (int)((cpu_usage / 100) * 9);
 
@@ -294,13 +279,12 @@ void printCpuUsage(int samples, int col_index, int **cpu_history, double cpu_usa
     printf("\n");
 }
 
-/**
- * Frees dynamically allocated memory.
- * 
- * @param cpu_history The CPU history array.
- * @param mem_history The memory history array.
- */
 void cleanup(int **cpu_history, int **mem_history) {
+    ///_|> descry: frees dynamically allocated memory
+    ///_|> arg_i: int **cpu_history, the cpu history array
+    ///_|> arg_ii: int **mem_history, the memory history array
+    ///_|> returning: nothing
+
     for (int row = 0; row < 10; row++) {
         free(cpu_history[row]);
         free(mem_history[row]);
@@ -356,16 +340,17 @@ int main(int argc, char **argv) {
         memset(mem_history[row], 0, samples * sizeof(int));
     }
 
-    // Print initial configuration
-    printf("Nbr of samples: %d -- every %d microSecs (%.2f secs)\n", samples, tdelay, tdelay / 1e6);
-
     long last_total_user = 0;
     long last_total_user_low = 0;
     long last_total_sys = 0;
     long last_total_idle = 0;
+    long last_total_io = 0;
+    long last_total_irq = 0;
+    long last_total_soft = 0;
 
     for (int i = 0; i < samples; i++) {
         printf("\033c"); // Clear screen
+        printf("Nbr of samples: %d -- every %d microSecs (%.2f secs)\n", samples, tdelay, tdelay / 1e6); // Print initial configuration
         int col_index = i % samples;
         int pipes[3][2];
         for (int i = 0; i < 3; i++){
@@ -394,7 +379,6 @@ int main(int argc, char **argv) {
                 results[0] = 9 - (int)((used_memory / total_memory_gb) * 9);
                 results[1] = total_memory_gb;
                 results[2] = used_memory;
-                int used_blocks_mem = (int)((used_memory / total_memory_gb) * 9);
                 write(pipes[0][1], results, sizeof(results));
                 close(pipes[0][1]);
                 exit(0);
@@ -413,11 +397,10 @@ int main(int argc, char **argv) {
             }
             else if (result == 0){
                 close(pipes[1][0]);
-                double cpu_usage = getCpuUsage(&last_total_user, &last_total_user_low, &last_total_sys, &last_total_idle);
+                double cpu_usage = getCpuUsage(&last_total_user, &last_total_user_low, &last_total_sys, &last_total_idle, &last_total_io, &last_total_irq, &last_total_soft);
                 write(pipes[1][1], &cpu_usage, sizeof(cpu_usage));
                 close(pipes[1][1]);
                 exit(0);
-            
             }
             else{
                 close(pipes[1][1]);

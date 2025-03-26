@@ -1,1 +1,2 @@
 https://pubs.opengroup.org/onlinepubs/009695399/basedefs/signal.h.html
+https://www.idnt.net/en-US/kb/941772
